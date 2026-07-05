@@ -15,6 +15,7 @@ public partial class upload : Page
         Response.ContentType = "text/html; charset=utf-8";
         Response.TrySkipIisCustomErrors = true;
         TransferUtility.AddSecurityHeaders(Response);
+        TransferUtility.CleanupExpiredTempUploadsIfDue();
 
         if (!String.Equals(Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
         {

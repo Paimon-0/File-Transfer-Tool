@@ -15,6 +15,8 @@ public static class TransferUtility
     private const int DefaultMaxChunkBytes = 16 * 1024 * 1024;
     private const int MinChunkBytes = 1024 * 1024;
     private const int MaxChunkBytes = 128 * 1024 * 1024;
+    private static readonly object CleanupLock = new object();
+    private static DateTime LastCleanupUtc = DateTime.MinValue;
 
     public static string NormalizeGroup(string group)
     {
@@ -217,6 +219,28 @@ public static class TransferUtility
         return Math.Max(1, Math.Min(8, configured));
     }
 
+    public static TimeSpan GetTempUploadMaxAge()
+    {
+        int configured;
+        if (!Int32.TryParse(GetSetting("TransferTempMaxAgeMinutes", "60"), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
+        {
+            configured = 60;
+        }
+
+        return TimeSpan.FromMinutes(Math.Max(5, configured));
+    }
+
+    public static TimeSpan GetTempCleanupInterval()
+    {
+        int configured;
+        if (!Int32.TryParse(GetSetting("TransferTempCleanupIntervalMinutes", "15"), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
+        {
+            configured = 15;
+        }
+
+        return TimeSpan.FromMinutes(Math.Max(1, configured));
+    }
+
     public static string FormatFileSize(long bytes)
     {
         string[] units = new string[] { "B", "KB", "MB", "GB", "TB", "PB" };
@@ -290,7 +314,7 @@ public static class TransferUtility
         {
             try
             {
-                if (directory.LastWriteTimeUtc < cutoff)
+                if (IsExpiredTempDirectory(directory, cutoff) && !HasActiveTempLocks(directory))
                 {
                     directory.Delete(true);
                 }
@@ -300,6 +324,31 @@ public static class TransferUtility
                 // Best-effort cleanup; active uploads must never fail because cleanup could not remove old data.
             }
         }
+    }
+
+    public static void CleanupExpiredTempUploadsIfDue()
+    {
+        TimeSpan interval = GetTempCleanupInterval();
+
+        lock (CleanupLock)
+        {
+            if (DateTime.UtcNow.Subtract(LastCleanupUtc) < interval)
+            {
+                return;
+            }
+
+            LastCleanupUtc = DateTime.UtcNow;
+        }
+
+        CleanupExpiredTempUploads(GetTempUploadMaxAge());
+    }
+
+    public static void TouchTempUploadSession(string sessionPath)
+    {
+        EnsureDirectory(sessionPath);
+        string touchPath = Path.Combine(sessionPath, ".lastactivity");
+        File.WriteAllText(touchPath, DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), Encoding.UTF8);
+        Directory.SetLastWriteTimeUtc(sessionPath, DateTime.UtcNow);
     }
 
     public static long ParseLongForm(HttpRequest request, string key)
@@ -348,6 +397,57 @@ public static class TransferUtility
         }
 
         return HttpContext.Current.Server.MapPath(configuredPath);
+    }
+
+    private static bool IsExpiredTempDirectory(DirectoryInfo directory, DateTime cutoff)
+    {
+        DateTime newest = directory.LastWriteTimeUtc;
+
+        foreach (FileInfo file in directory.GetFiles("*", SearchOption.AllDirectories))
+        {
+            if (file.LastWriteTimeUtc > newest)
+            {
+                newest = file.LastWriteTimeUtc;
+            }
+        }
+
+        return newest < cutoff;
+    }
+
+    private static bool HasActiveTempLocks(DirectoryInfo directory)
+    {
+        foreach (FileInfo file in directory.GetFiles("*", SearchOption.AllDirectories))
+        {
+            if (String.Equals(file.Name, "merge.lock", StringComparison.OrdinalIgnoreCase) ||
+                file.Name.EndsWith(".uploading", StringComparison.OrdinalIgnoreCase))
+            {
+                if (IsFileLocked(file.FullName))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsFileLocked(string path)
+    {
+        try
+        {
+            using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                return false;
+            }
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
     }
 }
 

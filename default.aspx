@@ -16,6 +16,7 @@
         Response.ContentEncoding = System.Text.Encoding.UTF8;
         Response.TrySkipIisCustomErrors = true;
         TransferUtility.AddSecurityHeaders(Response);
+        TransferUtility.CleanupExpiredTempUploadsIfDue();
 
         TokenEnabled = TransferSecurity.IsAccessTokenEnabled();
         RequestToken = Request.QueryString["token"] ?? "";

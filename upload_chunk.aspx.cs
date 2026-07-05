@@ -32,10 +32,7 @@ public partial class upload_chunk : Page
 
         try
         {
-            if (DateTime.UtcNow.Second % 20 == 0)
-            {
-                TransferUtility.CleanupExpiredTempUploads(TimeSpan.FromHours(24));
-            }
+            TransferUtility.CleanupExpiredTempUploadsIfDue();
 
             UploadChunkResult result = SaveChunk();
             WriteJson(200, ResultToJson(result));
@@ -101,6 +98,7 @@ public partial class upload_chunk : Page
         }
 
         string sessionPath = TransferUtility.GetTempUploadPath(uploadId);
+        TransferUtility.TouchTempUploadSession(sessionPath);
         WriteOrValidateMetadata(sessionPath, fileName, group, totalChunks, totalSize);
 
         string chunkPath = Path.Combine(sessionPath, GetChunkFileName(chunkIndex));
@@ -126,7 +124,7 @@ public partial class upload_chunk : Page
             File.Move(tempChunkPath, chunkPath);
         }
 
-        Directory.SetLastWriteTimeUtc(sessionPath, DateTime.UtcNow);
+        TransferUtility.TouchTempUploadSession(sessionPath);
 
         UploadChunkResult result = new UploadChunkResult();
         result.UploadId = uploadId;
@@ -149,6 +147,7 @@ public partial class upload_chunk : Page
 
         using (mergeLock)
         {
+            TransferUtility.TouchTempUploadSession(sessionPath);
             MergeResult mergeResult = MergeChunks(sessionPath, group, fileName, totalChunks, totalSize, uploadId);
             result.Complete = true;
             result.Merging = false;
@@ -180,13 +179,13 @@ public partial class upload_chunk : Page
     private static MergeResult MergeChunks(string sessionPath, string group, string fileName, int totalChunks, long expectedSize, string uploadId)
     {
         string finalPath = TransferUtility.GetUniqueDestinationPath(group, fileName);
-        string mergePath = finalPath + "." + uploadId + ".merging";
+        string mergePath = Path.Combine(sessionPath, "merged_" + uploadId + ".merging");
         long totalWritten = 0;
         byte[] buffer = new byte[CopyBufferBytes];
         byte[] hash;
 
         using (SHA256 sha256 = SHA256.Create())
-        using (FileStream output = new FileStream(mergePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, CopyBufferBytes, FileOptions.SequentialScan))
+        using (FileStream output = new FileStream(mergePath, FileMode.Create, FileAccess.Write, FileShare.None, CopyBufferBytes, FileOptions.SequentialScan))
         {
             for (int i = 0; i < totalChunks; i++)
             {
@@ -279,7 +278,8 @@ public partial class upload_chunk : Page
         string lockPath = Path.Combine(sessionPath, "merge.lock");
         try
         {
-            mergeLock = new FileStream(lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            mergeLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            mergeLock.SetLength(0);
             return true;
         }
         catch (IOException)
