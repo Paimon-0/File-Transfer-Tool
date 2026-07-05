@@ -1,71 +1,61 @@
 using System;
 using System.IO;
-using System.Web.UI;
+using System.Web;
 
-public partial class delete : Page
+public partial class delete : System.Web.UI.Page
 {
     protected void Page_Load(object sender, EventArgs e)
     {
-        Response.ContentType = "application/json";
-        Response.TrySkipIisCustomErrors = true;
-        TransferUtility.AddSecurityHeaders(Response);
-
-        if (!String.Equals(Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
-        {
-            WriteError(405, "Only POST is allowed.");
-            return;
-        }
-
-        if (!TransferSecurity.RequireAuthorized(Request, Response))
-        {
-            return;
-        }
-
+        Response.ContentType = "text/plain";
+        
         try
         {
-            string group = TransferUtility.NormalizeGroup(Request.Form["group"]);
-            if (!String.Equals(group, TransferUtility.GroupDeletable, StringComparison.OrdinalIgnoreCase))
+            // 获取参数
+            string fileName = Request.QueryString["file"];
+            string group = Request.QueryString["group"] ?? "group1";
+            
+            if (string.IsNullOrEmpty(fileName))
             {
-                WriteError(403, "Only files in group1 can be deleted.");
+                Response.Write("ERROR:请指定要删除的文件名！");
                 return;
             }
-
-            string fileName = TransferUtility.SanitizeFileName(Request.Form["file"]);
-            string filePath = TransferUtility.GetExistingFilePath(group, fileName);
-
+            
+            // 安全检查
+            if (fileName.Contains("..") || fileName.Contains("/") || fileName.Contains("\\"))
+            {
+                Response.Write("ERROR:文件名包含非法字符！");
+                return;
+            }
+            
+            // 确定文件路径
+            string directory;
+            if (group.ToLower() == "group1")
+                directory = "Files/group1/";
+            else
+            {
+                Response.Write("ERROR:操作无效");
+                return;
+            }
+            
+            string filePath = Server.MapPath(Path.Combine(directory, fileName));
+            
+            // 检查文件是否存在
             if (!File.Exists(filePath))
             {
-                WriteError(404, "File not found.");
+                Response.Write("ERROR:文件不存在！");
                 return;
             }
-
+            
+            // 删除文件
             File.Delete(filePath);
-            WriteJson(200, "{\"ok\":true,\"message\":\"Deleted " + JsonEscape(fileName) + ".\"}");
-        }
-        catch (InvalidOperationException ex)
-        {
-            WriteError(400, ex.Message);
+            
+            Response.Write("SUCCESS:文件 '" + fileName + "' 删除成功！");
         }
         catch (Exception ex)
         {
-            WriteError(500, "Delete failed: " + ex.Message);
+            Response.Write("ERROR:删除失败：" + ex.Message);
         }
-    }
-
-    private void WriteError(int statusCode, string message)
-    {
-        WriteJson(statusCode, "{\"ok\":false,\"error\":\"" + JsonEscape(message) + "\"}");
-    }
-
-    private void WriteJson(int statusCode, string json)
-    {
-        Response.StatusCode = statusCode;
-        Response.Write(json);
-        Context.ApplicationInstance.CompleteRequest();
-    }
-
-    private static string JsonEscape(string value)
-    {
-        return TransferUtility.JavaScript(value ?? String.Empty);
+        
+        Response.End();
     }
 }
