@@ -1,128 +1,147 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Web;
 using System.Web.UI;
 
 public partial class upload : Page
 {
+    private const int CopyBufferBytes = 1024 * 1024;
+
     protected void Page_Load(object sender, EventArgs e)
     {
-        string uploadGroup = Request.Form["uploadGroup"] ?? "group1";
-        
-        // 根据选择确定上传目录
-        string uploadDir;
-        if (uploadGroup == "group1")
-            uploadDir = Server.MapPath("Files/group1");
-        else if (uploadGroup == "group2")
-            uploadDir = Server.MapPath("Files/group2");
-        else if (uploadGroup == "group3")
-            uploadDir = Server.MapPath("Files/group3");
-        else
-            uploadDir = Server.MapPath("Files/group1");
-        
-        // 确保上传目录存在
-        if (!Directory.Exists(uploadDir))
+        Server.ScriptTimeout = 43200;
+        Response.ContentEncoding = System.Text.Encoding.UTF8;
+        Response.ContentType = "text/html; charset=utf-8";
+        Response.TrySkipIisCustomErrors = true;
+        TransferUtility.AddSecurityHeaders(Response);
+
+        if (!String.Equals(Request.HttpMethod, "POST", StringComparison.OrdinalIgnoreCase))
         {
-            Directory.CreateDirectory(uploadDir);
+            RenderResult("Upload", new string[] { "Only POST is allowed." }, true);
+            return;
         }
-        
-        // 检查是否有文件上传
-        if (Request.Files.Count > 0)
+
+        if (!TransferSecurity.RequireAuthorized(Request, Response))
         {
-            bool hasError = false;
-            string messageText = "";
-            string messageColor = "green";
-            
+            return;
+        }
+
+        List<string> messages = new List<string>();
+        bool hasError = false;
+
+        try
+        {
+            string uploadGroup = TransferUtility.NormalizeGroup(Request.Form["uploadGroup"]);
+            long maxFileBytes = TransferUtility.GetMaxFileBytes();
+
+            if (Request.Files.Count == 0)
+            {
+                RenderResult("Upload", new string[] { "No file was selected." }, true);
+                return;
+            }
+
             for (int i = 0; i < Request.Files.Count; i++)
             {
                 HttpPostedFile file = Request.Files[i];
-                
-                if (file.ContentLength > 0)
+                if (file == null || file.ContentLength < 0)
                 {
-                    try
+                    continue;
+                }
+
+                string fileName = TransferUtility.SanitizeFileName(file.FileName);
+                if (maxFileBytes > 0 && file.ContentLength > maxFileBytes)
+                {
+                    hasError = true;
+                    messages.Add(fileName + " is larger than the configured TransferMaxFileBytes limit.");
+                    continue;
+                }
+
+                string destinationPath = TransferUtility.GetUniqueDestinationPath(uploadGroup, fileName);
+                string tempPath = destinationPath + "." + Guid.NewGuid().ToString("N") + ".uploading";
+                long bytesWritten = 0;
+
+                try
+                {
+                    using (FileStream output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, CopyBufferBytes, FileOptions.SequentialScan))
                     {
-                        // 获取安全的文件名
-                        string fileName = Path.GetFileName(file.FileName);
-                        
-                        // 安全检查：防止路径遍历攻击
-                        if (fileName.Contains("..") || fileName.Contains("/") || fileName.Contains("\\"))
-                        {
-                            hasError = true;
-                            messageText = "文件名包含非法字符！";
-                            messageColor = "red";
-                            break;
-                        }
-                        
-                        // 设置保存路径
-                        string savePath = Path.Combine(uploadDir, fileName);
-                        
-                        // 检查文件是否已存在
-                        if (File.Exists(savePath))
-                        {
-                            // 添加时间戳避免冲突
-                            string nameWithoutExt = Path.GetFileNameWithoutExtension(fileName);
-                            string extension = Path.GetExtension(fileName);
-                            fileName = nameWithoutExt + "_" + DateTime.Now.ToString("yyyyMMddHHmmss") + extension;
-                            savePath = Path.Combine(uploadDir, fileName);
-                        }
-                        
-                        // 保存文件
-                        file.SaveAs(savePath);
-                        
-                        messageText += "文件 '" + fileName + "' 上传成功！<br/>";
-                        
-                        // 记录文件信息
-                        FileInfo savedFile = new FileInfo(savePath);
-                        messageText += "大小：" + FormatFileSize(savedFile.Length) + "，类型：" + file.ContentType + "<br/><br/>";
+                        bytesWritten = CopyStream(file.InputStream, output);
+                        output.Flush(true);
                     }
-                    catch (Exception ex)
-                    {
-                        hasError = true;
-                        messageText = "上传失败：" + ex.Message;
-                        messageColor = "red";
-                        break;
-                    }
+
+                    File.Move(tempPath, destinationPath);
+                    messages.Add(Path.GetFileName(destinationPath) + " uploaded successfully (" + TransferUtility.FormatFileSize(bytesWritten) + ").");
+                }
+                catch
+                {
+                    SafeDelete(tempPath);
+                    throw;
                 }
             }
-            
-            if (!hasError && string.IsNullOrEmpty(messageText))
-            {
-                messageText = "请选择有效的文件！";
-                messageColor = "orange";
-            }
-            
-            // 显示消息
-            Response.Write("<html><body style='font-family:Arial;padding:20px;'>");
-            Response.Write("<h2>上传结果</h2>");
-            Response.Write("<a href='default.aspx'>返回文件列表</a><br/><br/>");
-            Response.Write("<div style='color:" + messageColor + ";padding:10px;border:1px solid #ccc;border-radius:5px;'>");
-            Response.Write(messageText);
-            Response.Write("</div>");
-            Response.Write("</body></html>");
-            Response.End();
         }
-        else
+        catch (Exception ex)
         {
-            Response.Write("<html><body style='font-family:Arial;padding:20px;'>");
-            Response.Write("<h2>上传结果</h2>");
-            Response.Write("<a href='default.aspx'>返回文件列表</a><br/><br/>");
-            Response.Write("<div style='color:orange;padding:10px;border:1px solid #ccc;border-radius:5px;'>");
-            Response.Write("没有选择要上传的文件！");
-            Response.Write("</div>");
-            Response.Write("</body></html>");
-            Response.End();
+            hasError = true;
+            messages.Add("Upload failed: " + ex.Message);
+        }
+
+        if (messages.Count == 0)
+        {
+            hasError = true;
+            messages.Add("No valid file was selected.");
+        }
+
+        RenderResult("Upload result", messages.ToArray(), hasError);
+    }
+
+    private static long CopyStream(Stream input, Stream output)
+    {
+        byte[] buffer = new byte[CopyBufferBytes];
+        long total = 0;
+        int read;
+
+        while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            output.Write(buffer, 0, read);
+            total += read;
+        }
+
+        return total;
+    }
+
+    private static void SafeDelete(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
         }
     }
-    
-    private string FormatFileSize(long bytes)
+
+    private void RenderResult(string title, string[] messages, bool hasError)
     {
-        if (bytes < 1024)
-            return bytes + " B";
-        else if (bytes < 1024 * 1024)
-            return (bytes / 1024) + " KB";
-        else if (bytes < 1024 * 1024 * 1024)
-            return (bytes / (1024 * 1024)) + " MB";
-        else
-            return (bytes / (1024 * 1024 * 1024)) + " GB";
+        Response.Write("<!doctype html><html><head><meta charset=\"utf-8\"><title>");
+        Response.Write(TransferUtility.Html(title));
+        Response.Write("</title><style>body{font-family:Segoe UI,Arial,sans-serif;margin:40px;line-height:1.5}.box{border:1px solid #d7dde8;border-radius:8px;padding:18px;max-width:760px}.error{color:#b42318}.ok{color:#067647}a{color:#175cd3}</style></head><body>");
+        Response.Write("<h1>");
+        Response.Write(TransferUtility.Html(title));
+        Response.Write("</h1><p><a href=\"default.aspx\">Back to file list</a></p><div class=\"box ");
+        Response.Write(hasError ? "error" : "ok");
+        Response.Write("\"><ul>");
+
+        for (int i = 0; i < messages.Length; i++)
+        {
+            Response.Write("<li>");
+            Response.Write(TransferUtility.Html(messages[i]));
+            Response.Write("</li>");
+        }
+
+        Response.Write("</ul></div></body></html>");
+        Context.ApplicationInstance.CompleteRequest();
     }
 }
