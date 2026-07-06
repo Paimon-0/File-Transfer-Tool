@@ -12,9 +12,8 @@ public static class TransferUtility
     public const string GroupReadOnly = "group2";
     public const string GroupHidden = "group3";
 
-    private const int DefaultMaxChunkBytes = 16 * 1024 * 1024;
+    private const int DefaultMaxChunkBytes = 256 * 1024 * 1024;
     private const int MinChunkBytes = 1024 * 1024;
-    private const int MaxChunkBytes = 256 * 1024 * 1024;
     private static readonly object CleanupLock = new object();
     private static DateTime LastCleanupUtc = DateTime.MinValue;
 
@@ -188,13 +187,41 @@ public static class TransferUtility
 
     public static int GetMaxChunkBytes()
     {
-        int configured;
-        if (!Int32.TryParse(GetSetting("TransferMaxChunkBytes", ""), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
+        long configured = DefaultMaxChunkBytes;
+        string raw = ConfigurationManager.AppSettings["TransferMaxChunkBytes"];
+        if (!String.IsNullOrWhiteSpace(raw) &&
+            !Int64.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
         {
             configured = DefaultMaxChunkBytes;
         }
 
-        return Math.Max(MinChunkBytes, Math.Min(MaxChunkBytes, configured));
+        configured = Math.Max(MinChunkBytes, Math.Min(Int32.MaxValue, configured));
+        return (int)configured;
+    }
+
+    public static string GetMaxChunkBytesSource()
+    {
+        string raw = ConfigurationManager.AppSettings["TransferMaxChunkBytes"];
+        if (String.IsNullOrWhiteSpace(raw))
+        {
+            return "code default";
+        }
+
+        long configured;
+        if (!Int64.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
+        {
+            return "invalid web.config value, using code default";
+        }
+        if (configured < MinChunkBytes)
+        {
+            return "web.config, clamped to minimum";
+        }
+        if (configured > Int32.MaxValue)
+        {
+            return "web.config, clamped to Int32 maximum";
+        }
+
+        return "web.config";
     }
 
     public static long GetMaxFileBytes()
