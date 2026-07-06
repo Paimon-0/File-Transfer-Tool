@@ -673,6 +673,7 @@
         data.append("chunkIndex", String(chunkIndex));
         data.append("totalChunks", String(totalChunks));
         data.append("totalSize", String(file.size));
+        data.append("lastModified", typeof file.lastModified === "number" ? String(file.lastModified) : "");
         data.append("accessToken", getToken());
         data.append("chunk", blob, file.name + ".part" + chunkIndex);
 
