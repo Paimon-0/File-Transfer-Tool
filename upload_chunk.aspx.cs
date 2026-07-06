@@ -59,6 +59,7 @@ public partial class upload_chunk : Page
         int chunkIndex = TransferUtility.ParseIntForm(Request, "chunkIndex");
         int totalChunks = TransferUtility.ParseIntForm(Request, "totalChunks");
         long totalSize = TransferUtility.ParseLongForm(Request, "totalSize");
+        FileTimestampInfo timestamps = ParseClientFileTimes(Request);
 
         if (totalChunks <= 0 || totalChunks > MaxChunkCount)
         {
@@ -99,7 +100,7 @@ public partial class upload_chunk : Page
 
         string sessionPath = TransferUtility.GetTempUploadPath(uploadId);
         TransferUtility.TouchTempUploadSession(sessionPath);
-        WriteOrValidateMetadata(sessionPath, fileName, group, totalChunks, totalSize);
+        WriteOrValidateMetadata(sessionPath, fileName, group, totalChunks, totalSize, timestamps);
 
         string chunkPath = Path.Combine(sessionPath, GetChunkFileName(chunkIndex));
         string tempChunkPath = chunkPath + "." + Guid.NewGuid().ToString("N") + ".uploading";
@@ -148,7 +149,7 @@ public partial class upload_chunk : Page
         using (mergeLock)
         {
             TransferUtility.TouchTempUploadSession(sessionPath);
-            MergeResult mergeResult = MergeChunks(sessionPath, group, fileName, totalChunks, totalSize, uploadId);
+            MergeResult mergeResult = MergeChunks(sessionPath, group, fileName, totalChunks, totalSize, uploadId, timestamps);
             result.Complete = true;
             result.Merging = false;
             result.StoredFileName = Path.GetFileName(mergeResult.FilePath);
@@ -176,7 +177,7 @@ public partial class upload_chunk : Page
         }
     }
 
-    private static MergeResult MergeChunks(string sessionPath, string group, string fileName, int totalChunks, long expectedSize, string uploadId)
+    private static MergeResult MergeChunks(string sessionPath, string group, string fileName, int totalChunks, long expectedSize, string uploadId, FileTimestampInfo timestamps)
     {
         string finalPath = TransferUtility.GetUniqueDestinationPath(group, fileName);
         string mergePath = Path.Combine(sessionPath, "merged_" + uploadId + ".merging");
@@ -214,6 +215,7 @@ public partial class upload_chunk : Page
         }
 
         File.Move(mergePath, finalPath);
+        ApplyClientFileTimes(finalPath, timestamps);
 
         MergeResult result = new MergeResult();
         result.FilePath = finalPath;
@@ -237,13 +239,16 @@ public partial class upload_chunk : Page
         return total;
     }
 
-    private static void WriteOrValidateMetadata(string sessionPath, string fileName, string group, int totalChunks, long totalSize)
+    private static void WriteOrValidateMetadata(string sessionPath, string fileName, string group, int totalChunks, long totalSize, FileTimestampInfo timestamps)
     {
         string metadataPath = Path.Combine(sessionPath, "upload.meta");
         string metadata = "group=" + group + "\n" +
                           "fileName=" + Convert.ToBase64String(Encoding.UTF8.GetBytes(fileName)) + "\n" +
                           "totalChunks=" + totalChunks.ToString(CultureInfo.InvariantCulture) + "\n" +
-                          "totalSize=" + totalSize.ToString(CultureInfo.InvariantCulture) + "\n";
+                          "totalSize=" + totalSize.ToString(CultureInfo.InvariantCulture) + "\n" +
+                          "createdUtc=" + FormatTimestamp(timestamps.CreatedUtc) + "\n" +
+                          "lastModifiedUtc=" + FormatTimestamp(timestamps.LastModifiedUtc) + "\n" +
+                          "lastAccessedUtc=" + FormatTimestamp(timestamps.LastAccessedUtc) + "\n";
 
         lock (MetadataLock)
         {
@@ -257,6 +262,98 @@ public partial class upload_chunk : Page
             {
                 throw new InvalidOperationException("Upload metadata changed between chunks.");
             }
+        }
+    }
+
+    private static FileTimestampInfo ParseClientFileTimes(HttpRequest request)
+    {
+        FileTimestampInfo timestamps = new FileTimestampInfo();
+        timestamps.CreatedUtc = ParseOptionalTimestamp(request, "createdUtc", "creationTimeUtc", "created", "creationTime");
+        timestamps.LastModifiedUtc = ParseOptionalTimestamp(request, "lastModifiedUtc", "lastModified");
+        timestamps.LastAccessedUtc = ParseOptionalTimestamp(request, "lastAccessedUtc", "lastAccessTimeUtc", "lastAccessed", "accessed");
+        return timestamps;
+    }
+
+    private static DateTime? ParseOptionalTimestamp(HttpRequest request, params string[] fieldNames)
+    {
+        for (int i = 0; i < fieldNames.Length; i++)
+        {
+            string raw = request.Form[fieldNames[i]];
+            if (!String.IsNullOrWhiteSpace(raw))
+            {
+                return ParseTimestampValue(raw.Trim(), fieldNames[i]);
+            }
+        }
+
+        return null;
+    }
+
+    private static DateTime ParseTimestampValue(string raw, string fieldName)
+    {
+        long unixMilliseconds;
+        DateTime parsed;
+
+        if (Int64.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out unixMilliseconds))
+        {
+            try
+            {
+                parsed = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(unixMilliseconds);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                throw new InvalidOperationException(fieldName + " is outside the supported timestamp range.");
+            }
+        }
+        else if (!DateTime.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out parsed))
+        {
+            throw new InvalidOperationException(fieldName + " is not a valid timestamp.");
+        }
+
+        parsed = parsed.ToUniversalTime();
+        if (parsed < new DateTime(1601, 1, 1, 0, 0, 0, DateTimeKind.Utc))
+        {
+            throw new InvalidOperationException(fieldName + " is earlier than the supported file timestamp range.");
+        }
+
+        return parsed;
+    }
+
+    private static string FormatTimestamp(DateTime? timestamp)
+    {
+        if (!timestamp.HasValue)
+        {
+            return "";
+        }
+
+        return timestamp.Value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+    }
+
+    private static void ApplyClientFileTimes(string filePath, FileTimestampInfo timestamps)
+    {
+        if (timestamps == null)
+        {
+            return;
+        }
+
+        TrySetFileTime(filePath, timestamps.CreatedUtc, File.SetCreationTimeUtc);
+        TrySetFileTime(filePath, timestamps.LastAccessedUtc, File.SetLastAccessTimeUtc);
+        TrySetFileTime(filePath, timestamps.LastModifiedUtc, File.SetLastWriteTimeUtc);
+    }
+
+    private static void TrySetFileTime(string filePath, DateTime? timestamp, Action<string, DateTime> setter)
+    {
+        if (!timestamp.HasValue)
+        {
+            return;
+        }
+
+        try
+        {
+            setter(filePath, timestamp.Value.ToUniversalTime());
+        }
+        catch
+        {
+            // Timestamp preservation is best effort because filesystems differ in supported metadata.
         }
     }
 
@@ -347,6 +444,13 @@ public partial class upload_chunk : Page
     private static string JsonEscape(string value)
     {
         return TransferUtility.JavaScript(value ?? String.Empty);
+    }
+
+    private class FileTimestampInfo
+    {
+        public DateTime? CreatedUtc;
+        public DateTime? LastModifiedUtc;
+        public DateTime? LastAccessedUtc;
     }
 
     private class UploadChunkResult
