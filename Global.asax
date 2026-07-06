@@ -1,14 +1,13 @@
 <%@ Application Language="C#" %>
 <%@ Import Namespace="System" %>
-<%@ Import Namespace="System.Threading" %>
 
 <script runat="server">
-    private static Timer tempCleanupTimer;
+    private static System.Threading.Timer tempCleanupTimer;
 
     protected void Application_Start(object sender, EventArgs e)
     {
         TimeSpan interval = TransferUtility.GetTempCleanupInterval();
-        tempCleanupTimer = new Timer(delegate
+        tempCleanupTimer = new System.Threading.Timer(delegate
         {
             try
             {
@@ -23,7 +22,7 @@
 
     protected void Application_End(object sender, EventArgs e)
     {
-        Timer timer = tempCleanupTimer;
+        System.Threading.Timer timer = tempCleanupTimer;
         if (timer != null)
         {
             timer.Dispose();
