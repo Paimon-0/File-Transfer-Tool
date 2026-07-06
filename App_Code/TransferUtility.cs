@@ -14,7 +14,7 @@ public static class TransferUtility
 
     private const int DefaultMaxChunkBytes = 16 * 1024 * 1024;
     private const int MinChunkBytes = 1024 * 1024;
-    private const int MaxChunkBytes = 128 * 1024 * 1024;
+    private const int MaxChunkBytes = 256 * 1024 * 1024;
     private static readonly object CleanupLock = new object();
     private static DateTime LastCleanupUtc = DateTime.MinValue;
 
