@@ -8,6 +8,7 @@
     protected bool TokenEnabled;
     protected string RequestToken = "";
     protected int MaxChunkBytes;
+    protected string MaxChunkBytesSource = "";
     protected int ParallelUploads;
     protected long MaxFileBytes;
 
@@ -22,6 +23,7 @@
         RequestToken = Request.QueryString["token"] ?? "";
         IsAuthorized = TransferSecurity.IsAuthorized(Request);
         MaxChunkBytes = TransferUtility.GetMaxChunkBytes();
+        MaxChunkBytesSource = TransferUtility.GetMaxChunkBytesSource();
         ParallelUploads = TransferUtility.GetClientParallelUploads();
         MaxFileBytes = TransferUtility.GetMaxFileBytes();
 
@@ -404,7 +406,7 @@
                 <h1>File Transfer Tool</h1>
             </div>
             <div class="status-line">
-                <span>Chunk: <%= TransferUtility.Html(TransferUtility.FormatFileSize(MaxChunkBytes)) %></span>
+                <span>Chunk: <%= TransferUtility.Html(TransferUtility.FormatFileSize(MaxChunkBytes)) %> (<%= TransferUtility.Html(MaxChunkBytesSource) %>)</span>
                 <span>Parallel: <%= ParallelUploads.ToString(CultureInfo.InvariantCulture) %></span>
                 <span>Limit: <%= MaxFileBytes > 0 ? TransferUtility.Html(TransferUtility.FormatFileSize(MaxFileBytes)) : "unlimited" %></span>
             </div>
