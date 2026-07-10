@@ -9,6 +9,9 @@ File Transfer Tool is a small ASP.NET Web Forms application for transferring fil
 - Atomic finalization: chunks are merged in the temporary upload directory first, then moved into the visible storage directory.
 - Automatic cleanup for abandoned temporary uploads.
 - SHA-256 reporting after a successful chunked upload.
+- Optional timestamp-based renaming for duplicate file names.
+- Inline file opening from the browser list, with sandboxed active content.
+- Multi-file upload progress with a bounded, newest-first activity list.
 - Optional access token checks through `TransferAccessToken`.
 - Basic hardening headers and path normalization to reduce accidental exposure and traversal risks.
 - Modification timestamp preservation for modern browser uploads.
@@ -59,6 +62,8 @@ Settings are stored in `web.config` under `<appSettings>`.
 
 `TransferParallelUploads` is clamped by the application to avoid overwhelming a small IIS deployment. Larger chunks reduce request overhead, while smaller chunks recover more cheaply after an interrupted transfer.
 
+`TransferMaxChunkBytes` is a maximum chunk size, not a minimum file size. A smaller file is sent as one chunk containing only its actual bytes; an empty file is also sent as one zero-byte chunk. No padding or special configuration is required.
+
 ## File Groups
 
 The UI stores files in three groups:
@@ -79,6 +84,8 @@ Modern browsers use `upload_chunk.aspx`:
 4. When all chunks are present, the server merges them into a temporary merged file.
 5. The merged file is moved into `TransferStorageRoot`.
 6. Temporary upload data is removed.
+
+When **保留重复文件** is unchecked, an upload whose name already exists is rejected and the reason remains visible in the upload activity list. When checked, the existing file is preserved and the new file is stored as `name_yyyyMMddHHmmss.ext`, using the server's local upload time. If that timestamped name is also occupied, the server advances to the next available timestamp while keeping the same format.
 
 The legacy form fallback posts to `upload.aspx`. It is kept for compatibility, but the chunked path is the preferred path for large files and metadata preservation.
 

@@ -34,6 +34,7 @@ public partial class upload : Page
         try
         {
             string uploadGroup = TransferUtility.NormalizeGroup(Request.Form["uploadGroup"]);
+            bool keepDuplicates = TransferUtility.ParseBooleanForm(Request, "keepDuplicates");
             long maxFileBytes = TransferUtility.GetMaxFileBytes();
 
             if (Request.Files.Count == 0)
@@ -58,20 +59,26 @@ public partial class upload : Page
                     continue;
                 }
 
-                string destinationPath = TransferUtility.GetUniqueDestinationPath(uploadGroup, fileName);
-                string tempPath = destinationPath + "." + Guid.NewGuid().ToString("N") + ".uploading";
+                string tempPath = Path.Combine(TransferUtility.GetTempUploadRoot(), "legacy_" + Guid.NewGuid().ToString("N") + ".uploading");
                 long bytesWritten = 0;
 
                 try
                 {
+                    TransferUtility.EnsureDestinationAvailable(uploadGroup, fileName, keepDuplicates);
                     using (FileStream output = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, CopyBufferBytes, FileOptions.SequentialScan))
                     {
                         bytesWritten = CopyStream(file.InputStream, output);
                         output.Flush(true);
                     }
 
-                    File.Move(tempPath, destinationPath);
+                    string destinationPath = TransferUtility.MoveFileToDestination(tempPath, uploadGroup, fileName, keepDuplicates, DateTime.Now);
                     messages.Add(Path.GetFileName(destinationPath) + " uploaded successfully (" + TransferUtility.FormatFileSize(bytesWritten) + ").");
+                }
+                catch (DuplicateFileException ex)
+                {
+                    SafeDelete(tempPath);
+                    hasError = true;
+                    messages.Add(fileName + " was not uploaded. " + ex.Message);
                 }
                 catch
                 {
@@ -80,10 +87,15 @@ public partial class upload : Page
                 }
             }
         }
-        catch (Exception ex)
+        catch (InvalidOperationException ex)
         {
             hasError = true;
             messages.Add("Upload failed: " + ex.Message);
+        }
+        catch (Exception)
+        {
+            hasError = true;
+            messages.Add("Upload failed due to a server error.");
         }
 
         if (messages.Count == 0)
