@@ -57,7 +57,7 @@
 
         if (files.Length == 0)
         {
-            Response.Write("<tr><td colspan=\"5\" class=\"empty\">No files</td></tr>");
+            Response.Write("<tr><td colspan=\"6\" class=\"empty\">No files</td></tr>");
             return;
         }
 
@@ -66,6 +66,7 @@
             FileInfo file = files[i];
             string fileName = file.Name;
             string downloadUrl = "download.aspx?group=" + TransferUtility.Url(group) + "&file=" + TransferUtility.Url(fileName) + TokenQuery();
+            string openUrl = downloadUrl + "&inline=1";
 
             Response.Write("<tr>");
             Response.Write("<td class=\"name\"><span title=\"");
@@ -79,6 +80,9 @@
             Response.Write("<td>");
             Response.Write(TransferUtility.Html(file.LastWriteTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture)));
             Response.Write("</td>");
+            Response.Write("<td><a class=\"button secondary\" target=\"_blank\" rel=\"noopener noreferrer\" href=\"");
+            Response.Write(TransferUtility.Html(openUrl));
+            Response.Write("\">Open</a></td>");
             Response.Write("<td><a class=\"button secondary\" href=\"");
             Response.Write(TransferUtility.Html(downloadUrl));
             Response.Write("\">Download</a></td>");
@@ -217,6 +221,16 @@
             cursor: pointer;
         }
         .segments input { margin: 0; }
+        .checkbox-option {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            min-height: 42px;
+            padding: 0 4px;
+            color: var(--text);
+            cursor: pointer;
+        }
+        .checkbox-option input { margin: 0; }
         .button {
             display: inline-flex;
             justify-content: center;
@@ -261,6 +275,9 @@
             display: grid;
             gap: 10px;
             margin-top: 14px;
+            max-height: 420px;
+            overflow-y: auto;
+            overscroll-behavior: contain;
         }
         .queue-item {
             display: grid;
@@ -301,6 +318,7 @@
         }
         .queue-item.done .progress > span { background: var(--ok); }
         .queue-item.error .progress > span { background: var(--danger); }
+        .queue-item > .meta { grid-column: 1 / -1; }
         .tabs {
             display: flex;
             gap: 8px;
@@ -324,7 +342,7 @@
         table {
             width: 100%;
             border-collapse: collapse;
-            min-width: 720px;
+            min-width: 820px;
         }
         th,
         td {
@@ -430,7 +448,9 @@
                         <label><input type="radio" name="uploadGroup" value="group2">Read-only</label>
                         <label><input type="radio" name="uploadGroup" value="group3">Hidden</label>
                     </div>
+                    <label class="checkbox-option"><input id="keepDuplicates" name="keepDuplicates" type="checkbox" value="true">保留重复文件</label>
                 </div>
+                <div id="uploadStatus" class="meta" aria-live="polite">上传 0/0，上传失败 0</div>
 
                 <% if (TokenEnabled) { %>
                 <div style="margin-top:12px">
@@ -458,6 +478,7 @@
                             <th>File</th>
                             <th>Size</th>
                             <th>Modified</th>
+                            <th>Open</th>
                             <th>Download</th>
                             <th>Delete</th>
                         </tr>
@@ -475,6 +496,7 @@
                             <th>File</th>
                             <th>Size</th>
                             <th>Modified</th>
+                            <th>Open</th>
                             <th>Download</th>
                             <th>Delete</th>
                         </tr>
@@ -519,8 +541,11 @@
     var fileInput = document.getElementById("fileInput");
     var uploadButton = document.getElementById("uploadButton");
     var uploadMeta = document.getElementById("uploadMeta");
+    var uploadStatus = document.getElementById("uploadStatus");
     var queue = document.getElementById("queue");
     var accessToken = document.getElementById("accessToken");
+    var keepDuplicates = document.getElementById("keepDuplicates");
+    var uploadRunning = false;
 
     if (accessToken && initialToken) {
         accessToken.value = initialToken;
@@ -580,53 +605,77 @@
             }
 
             event.preventDefault();
+            if (uploadRunning) {
+                return;
+            }
             var files = Array.prototype.slice.call(fileInput.files || []);
             if (!files.length) {
                 window.alert("Select at least one file.");
                 return;
             }
 
-            runUploadQueue(files).catch(function (error) {
-                window.alert(error.message);
-            });
+            runUploadQueue(files);
         });
     }
 
     async function runUploadQueue(files) {
+        uploadRunning = true;
         uploadButton.disabled = true;
         queue.innerHTML = "";
+        var uploadedCount = 0;
+        var failedCount = 0;
+        var nextFile = 0;
+        var group = getSelectedGroup();
+        var preserveDuplicates = !!(keepDuplicates && keepDuplicates.checked);
+        updateUploadStatus(uploadedCount, files.length, failedCount);
+
+        async function fileWorker() {
+            while (nextFile < files.length) {
+                var index = nextFile++;
+                try {
+                    await uploadFile(files[index], index, group, preserveDuplicates);
+                    uploadedCount++;
+                } catch (error) {
+                    failedCount++;
+                }
+                updateUploadStatus(uploadedCount, files.length, failedCount);
+            }
+        }
 
         try {
-            for (var i = 0; i < files.length; i++) {
-                await uploadFile(files[i], i);
+            var workers = [];
+            var workerCount = Math.min(parallelUploads, files.length);
+            for (var i = 0; i < workerCount; i++) {
+                workers.push(fileWorker());
             }
+            await Promise.all(workers);
         } finally {
+            uploadRunning = false;
             uploadButton.disabled = false;
         }
     }
 
-    async function uploadFile(file, index) {
+    async function uploadFile(file, index, group, preserveDuplicates) {
+        var row = createQueueItem(file);
         if (maxFileBytes > 0 && file.size > maxFileBytes) {
-            throw new Error(file.name + " exceeds the configured file limit.");
+            var sizeError = new Error(file.name + " exceeds the configured file limit.");
+            setQueueError(row, sizeError.message);
+            throw sizeError;
         }
 
-        var row = createQueueItem(file);
-        var group = getSelectedGroup();
         var uploadId = createUploadId(index);
         var totalChunks = Math.max(1, Math.ceil(file.size / maxChunkBytes));
-        var nextChunk = 0;
         var completedChunks = 0;
         var uploadedBytes = 0;
         var startedAt = Date.now();
         var finalResult = null;
 
-        async function worker() {
-            while (nextChunk < totalChunks) {
-                var chunkIndex = nextChunk++;
+        try {
+            for (var chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
                 var start = chunkIndex * maxChunkBytes;
                 var end = Math.min(file.size, start + maxChunkBytes);
                 var blob = file.slice(start, end);
-                var result = await uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks);
+                var result = await uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates);
 
                 completedChunks++;
                 uploadedBytes += blob.size;
@@ -636,16 +685,6 @@
 
                 updateProgress(row, uploadedBytes, file.size, completedChunks, totalChunks, startedAt, result.merging);
             }
-        }
-
-        var workers = [];
-        var workerCount = Math.min(parallelUploads, totalChunks);
-        for (var i = 0; i < workerCount; i++) {
-            workers.push(worker());
-        }
-
-        try {
-            await Promise.all(workers);
         } catch (error) {
             setQueueError(row, error.message);
             throw error;
@@ -661,11 +700,11 @@
         row.querySelector(".progress > span").style.width = "100%";
         var detail = document.createElement("div");
         detail.className = "meta";
-        detail.textContent = "SHA-256 " + finalResult.sha256;
+        detail.textContent = (finalResult.fileName !== file.name ? "Stored as " + finalResult.fileName + " · " : "") + "SHA-256 " + finalResult.sha256;
         row.appendChild(detail);
     }
 
-    async function uploadChunk(file, blob, uploadId, group, chunkIndex, totalChunks) {
+    async function uploadChunk(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates) {
         var data = new FormData();
         data.append("uploadId", uploadId);
         data.append("group", group);
@@ -673,6 +712,7 @@
         data.append("chunkIndex", String(chunkIndex));
         data.append("totalChunks", String(totalChunks));
         data.append("totalSize", String(file.size));
+        data.append("keepDuplicates", preserveDuplicates ? "true" : "false");
         data.append("lastModified", typeof file.lastModified === "number" ? String(file.lastModified) : "");
         data.append("accessToken", getToken());
         data.append("chunk", blob, file.name + ".part" + chunkIndex);
@@ -684,14 +724,14 @@
         }).then(parseJsonResponse);
     }
 
-    async function uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks) {
+    async function uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates) {
         var lastError = null;
         for (var attempt = 0; attempt < 4; attempt++) {
             try {
-                return await uploadChunk(file, blob, uploadId, group, chunkIndex, totalChunks);
+                return await uploadChunk(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates);
             } catch (error) {
                 lastError = error;
-                if (attempt === 3) {
+                if (attempt === 3 || !isRetryableUploadError(error)) {
                     break;
                 }
                 await delay(500 * Math.pow(2, attempt));
@@ -699,6 +739,10 @@
         }
 
         throw lastError;
+    }
+
+    function isRetryableUploadError(error) {
+        return !error.status || error.status === 408 || error.status === 429 || error.status >= 500;
     }
 
     function delay(ms) {
@@ -712,8 +756,13 @@
         item.className = "queue-item";
         item.innerHTML = "<div class=\"queue-name\"></div><div class=\"queue-state\">Queued</div><div class=\"progress\"><span></span></div>";
         item.querySelector(".queue-name").textContent = file.name + " (" + formatBytes(file.size) + ")";
-        queue.appendChild(item);
+        queue.insertBefore(item, queue.firstChild);
+        queue.scrollTop = 0;
         return item;
+    }
+
+    function updateUploadStatus(uploadedCount, totalCount, failedCount) {
+        uploadStatus.textContent = "上传 " + uploadedCount + "/" + totalCount + "，上传失败 " + failedCount;
     }
 
     function updateProgress(row, uploadedBytes, totalBytes, completedChunks, totalChunks, startedAt, merging) {
@@ -743,7 +792,9 @@
             }
 
             if (!response.ok || data.ok === false) {
-                throw new Error(data.error || response.statusText);
+                var responseError = new Error(data.error || response.statusText);
+                responseError.status = response.status;
+                throw responseError;
             }
 
             return data;

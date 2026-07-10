@@ -37,6 +37,10 @@ public partial class upload_chunk : Page
             UploadChunkResult result = SaveChunk();
             WriteJson(200, ResultToJson(result));
         }
+        catch (DuplicateFileException ex)
+        {
+            WriteError(409, ex.Message);
+        }
         catch (InvalidOperationException ex)
         {
             WriteError(400, ex.Message);
@@ -45,9 +49,9 @@ public partial class upload_chunk : Page
         {
             WriteError(400, ex.Message);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            WriteError(500, "Upload failed: " + ex.Message);
+            WriteError(500, "Upload failed due to a server error.");
         }
     }
 
@@ -59,6 +63,7 @@ public partial class upload_chunk : Page
         int chunkIndex = TransferUtility.ParseIntForm(Request, "chunkIndex");
         int totalChunks = TransferUtility.ParseIntForm(Request, "totalChunks");
         long totalSize = TransferUtility.ParseLongForm(Request, "totalSize");
+        bool keepDuplicates = TransferUtility.ParseBooleanForm(Request, "keepDuplicates");
         FileTimestampInfo timestamps = ParseClientFileTimes(Request);
 
         if (totalChunks <= 0 || totalChunks > MaxChunkCount)
@@ -98,9 +103,11 @@ public partial class upload_chunk : Page
             throw new InvalidOperationException("Chunk is empty.");
         }
 
+        TransferUtility.EnsureDestinationAvailable(group, fileName, keepDuplicates);
+
         string sessionPath = TransferUtility.GetTempUploadPath(uploadId);
         TransferUtility.TouchTempUploadSession(sessionPath);
-        WriteOrValidateMetadata(sessionPath, fileName, group, totalChunks, totalSize, timestamps);
+        WriteOrValidateMetadata(sessionPath, fileName, group, totalChunks, totalSize, keepDuplicates, timestamps);
 
         string chunkPath = Path.Combine(sessionPath, GetChunkFileName(chunkIndex));
         string tempChunkPath = chunkPath + "." + Guid.NewGuid().ToString("N") + ".uploading";
@@ -149,7 +156,7 @@ public partial class upload_chunk : Page
         using (mergeLock)
         {
             TransferUtility.TouchTempUploadSession(sessionPath);
-            MergeResult mergeResult = MergeChunks(sessionPath, group, fileName, totalChunks, totalSize, uploadId, timestamps);
+            MergeResult mergeResult = MergeChunks(sessionPath, group, fileName, totalChunks, totalSize, uploadId, keepDuplicates, timestamps);
             result.Complete = true;
             result.Merging = false;
             result.StoredFileName = Path.GetFileName(mergeResult.FilePath);
@@ -177,9 +184,8 @@ public partial class upload_chunk : Page
         }
     }
 
-    private static MergeResult MergeChunks(string sessionPath, string group, string fileName, int totalChunks, long expectedSize, string uploadId, FileTimestampInfo timestamps)
+    private static MergeResult MergeChunks(string sessionPath, string group, string fileName, int totalChunks, long expectedSize, string uploadId, bool keepDuplicates, FileTimestampInfo timestamps)
     {
-        string finalPath = TransferUtility.GetUniqueDestinationPath(group, fileName);
         string mergePath = Path.Combine(sessionPath, "merged_" + uploadId + ".merging");
         long totalWritten = 0;
         byte[] buffer = new byte[CopyBufferBytes];
@@ -214,7 +220,7 @@ public partial class upload_chunk : Page
             hash = sha256.Hash;
         }
 
-        File.Move(mergePath, finalPath);
+        string finalPath = TransferUtility.MoveFileToDestination(mergePath, group, fileName, keepDuplicates, DateTime.Now);
         ApplyClientFileTimes(finalPath, timestamps);
 
         MergeResult result = new MergeResult();
@@ -239,13 +245,14 @@ public partial class upload_chunk : Page
         return total;
     }
 
-    private static void WriteOrValidateMetadata(string sessionPath, string fileName, string group, int totalChunks, long totalSize, FileTimestampInfo timestamps)
+    private static void WriteOrValidateMetadata(string sessionPath, string fileName, string group, int totalChunks, long totalSize, bool keepDuplicates, FileTimestampInfo timestamps)
     {
         string metadataPath = Path.Combine(sessionPath, "upload.meta");
         string metadata = "group=" + group + "\n" +
                           "fileName=" + Convert.ToBase64String(Encoding.UTF8.GetBytes(fileName)) + "\n" +
                           "totalChunks=" + totalChunks.ToString(CultureInfo.InvariantCulture) + "\n" +
                           "totalSize=" + totalSize.ToString(CultureInfo.InvariantCulture) + "\n" +
+                          "keepDuplicates=" + (keepDuplicates ? "true" : "false") + "\n" +
                           "createdUtc=" + FormatTimestamp(timestamps.CreatedUtc) + "\n" +
                           "lastModifiedUtc=" + FormatTimestamp(timestamps.LastModifiedUtc) + "\n" +
                           "lastAccessedUtc=" + FormatTimestamp(timestamps.LastAccessedUtc) + "\n";

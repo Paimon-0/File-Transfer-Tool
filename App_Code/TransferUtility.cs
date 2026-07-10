@@ -135,34 +135,67 @@ public static class TransferUtility
         return filePath;
     }
 
-    public static string GetUniqueDestinationPath(string group, string fileName)
+    public static void EnsureDestinationAvailable(string group, string fileName, bool keepDuplicates)
     {
-        string groupPath = GetGroupStoragePath(group);
-        string safeFileName = SanitizeFileName(fileName);
-        string candidate = Path.GetFullPath(Path.Combine(groupPath, safeFileName));
-        EnsurePathWithin(candidate, groupPath);
+        if (!keepDuplicates && File.Exists(GetExistingFilePath(group, fileName)))
+        {
+            throw new DuplicateFileException(fileName);
+        }
+    }
 
-        if (!File.Exists(candidate))
+    public static string MoveFileToDestination(string sourcePath, string group, string fileName, bool keepDuplicates, DateTime uploadTime)
+    {
+        string safeFileName = SanitizeFileName(fileName);
+        string candidate = GetExistingFilePath(group, safeFileName);
+
+        if (TryMoveToAvailablePath(sourcePath, candidate))
         {
             return candidate;
         }
 
+        if (!keepDuplicates)
+        {
+            throw new DuplicateFileException(safeFileName);
+        }
+
         string name = Path.GetFileNameWithoutExtension(safeFileName);
         string extension = Path.GetExtension(safeFileName);
-        string stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-
-        for (int i = 1; i < 10000; i++)
+        if (String.IsNullOrEmpty(name))
         {
-            string nextName = name + "_" + stamp + "_" + i.ToString(CultureInfo.InvariantCulture) + extension;
-            candidate = Path.GetFullPath(Path.Combine(groupPath, nextName));
-            EnsurePathWithin(candidate, groupPath);
-            if (!File.Exists(candidate))
+            name = safeFileName;
+            extension = String.Empty;
+        }
+
+        for (int i = 0; i < 10000; i++)
+        {
+            string stamp = uploadTime.AddSeconds(i).ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+            string nextName = name + "_" + stamp + extension;
+            candidate = GetExistingFilePath(group, nextName);
+            if (TryMoveToAvailablePath(sourcePath, candidate))
             {
                 return candidate;
             }
         }
 
         throw new IOException("Unable to allocate a unique destination file name.");
+    }
+
+    private static bool TryMoveToAvailablePath(string sourcePath, string destinationPath)
+    {
+        try
+        {
+            File.Move(sourcePath, destinationPath);
+            return true;
+        }
+        catch (IOException)
+        {
+            if (!File.Exists(destinationPath))
+            {
+                throw;
+            }
+
+            return false;
+        }
     }
 
     public static void EnsureDirectory(string path)
@@ -400,6 +433,21 @@ public static class TransferUtility
         return value;
     }
 
+    public static bool ParseBooleanForm(HttpRequest request, string key)
+    {
+        string raw = request.Form[key];
+        if (String.IsNullOrWhiteSpace(raw) || String.Equals(raw, "false", StringComparison.OrdinalIgnoreCase) || raw == "0" || String.Equals(raw, "off", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+        if (String.Equals(raw, "true", StringComparison.OrdinalIgnoreCase) || raw == "1" || String.Equals(raw, "on", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        throw new InvalidOperationException("Invalid boolean value for " + key + ".");
+    }
+
     public static string GetSetting(string key, string fallback)
     {
         string value = ConfigurationManager.AppSettings[key];
@@ -475,6 +523,14 @@ public static class TransferUtility
         {
             return true;
         }
+    }
+}
+
+public class DuplicateFileException : InvalidOperationException
+{
+    public DuplicateFileException(string fileName)
+        : base("A file named " + Path.GetFileName(fileName ?? String.Empty) + " already exists. Select 保留重复文件 to upload a renamed copy.")
+    {
     }
 }
 

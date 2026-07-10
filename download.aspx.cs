@@ -31,6 +31,14 @@ public partial class download : Page
             string group = TransferUtility.NormalizeGroup(Request.QueryString["group"]);
             string fileName = TransferUtility.SanitizeFileName(Request.QueryString["file"]);
             string filePath = TransferUtility.GetExistingFilePath(group, fileName);
+            string inlineValue = Request.QueryString["inline"];
+            bool openInline = String.Equals(inlineValue, "1", StringComparison.Ordinal);
+
+            if (!String.IsNullOrEmpty(inlineValue) && !openInline)
+            {
+                WriteText(400, "Invalid inline option.");
+                return;
+            }
 
             if (!File.Exists(filePath))
             {
@@ -44,7 +52,11 @@ public partial class download : Page
 
             Response.ContentType = MimeMapping.GetMimeMapping(file.Name);
             Response.AddHeader("Accept-Ranges", "bytes");
-            Response.AddHeader("Content-Disposition", BuildContentDisposition(file.Name));
+            Response.AddHeader("Content-Disposition", BuildContentDisposition(file.Name, openInline));
+            if (openInline)
+            {
+                Response.Headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob:";
+            }
             Response.AddHeader("Last-Modified", file.LastWriteTimeUtc.ToString("R", CultureInfo.InvariantCulture));
             Response.AddHeader("ETag", "\"" + file.Length.ToString(CultureInfo.InvariantCulture) + "-" + file.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture) + "\"");
 
@@ -85,9 +97,9 @@ public partial class download : Page
         {
             WriteText(400, ex.Message);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            WriteText(500, "Download failed: " + ex.Message);
+            WriteText(500, "Download failed due to a server error.");
         }
     }
 
@@ -179,10 +191,10 @@ public partial class download : Page
         return true;
     }
 
-    private static string BuildContentDisposition(string fileName)
+    private static string BuildContentDisposition(string fileName, bool inline)
     {
         string fallback = fileName.Replace("\\", "_").Replace("/", "_").Replace("\"", "'");
-        return "attachment; filename=\"" + fallback + "\"; filename*=UTF-8''" + TransferUtility.Url(fileName);
+        return (inline ? "inline" : "attachment") + "; filename=\"" + fallback + "\"; filename*=UTF-8''" + TransferUtility.Url(fileName);
     }
 
     private void WriteText(int statusCode, string message)
