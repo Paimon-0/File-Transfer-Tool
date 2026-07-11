@@ -281,7 +281,7 @@
         }
         .queue-item {
             display: grid;
-            grid-template-columns: minmax(0, 1fr) 140px;
+            grid-template-columns: minmax(0, 1fr) 300px;
             gap: 10px;
             align-items: center;
             padding: 10px;
@@ -448,9 +448,8 @@
                         <label><input type="radio" name="uploadGroup" value="group2">Read-only</label>
                         <label><input type="radio" name="uploadGroup" value="group3">Hidden</label>
                     </div>
-                    <label class="checkbox-option"><input id="keepDuplicates" name="keepDuplicates" type="checkbox" value="true">保留重复文件</label>
+                    <label class="checkbox-option"><input id="keepDuplicates" name="keepDuplicates" type="checkbox" value="true">Keep duplicate files</label>
                 </div>
-                <div id="uploadStatus" class="meta" aria-live="polite">上传 0/0，上传失败 0</div>
 
                 <% if (TokenEnabled) { %>
                 <div style="margin-top:12px">
@@ -462,6 +461,7 @@
                 <% } %>
             </form>
             <div id="uploadMeta" class="meta"></div>
+            <div id="uploadStatus" class="meta" aria-live="polite"></div> <!--修改-->
             <div id="queue" class="queue" aria-live="polite"></div>
         </section>
 
@@ -594,7 +594,7 @@
         fileInput.addEventListener("change", function () {
             var files = Array.prototype.slice.call(fileInput.files || []);
             var total = files.reduce(function (sum, file) { return sum + file.size; }, 0);
-            uploadMeta.textContent = files.length ? files.length + " file(s), " + formatBytes(total) + " selected" : "";
+            uploadMeta.textContent = files.length ? files.length + " file(s), " + formatBytes(total) + " in total" : ""; <!--修改：文件统计-->
         });
     }
 
@@ -662,48 +662,72 @@
             setQueueError(row, sizeError.message);
             throw sizeError;
         }
-
+    
         var uploadId = createUploadId(index);
         var totalChunks = Math.max(1, Math.ceil(file.size / maxChunkBytes));
+        var nextChunk = 0;
         var completedChunks = 0;
         var uploadedBytes = 0;
         var startedAt = Date.now();
         var finalResult = null;
-
-        try {
-            for (var chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+        var uploadError = null;
+    
+        async function worker() {
+            while (nextChunk < totalChunks) {
+                if (uploadError) return;
+    
+                var chunkIndex = nextChunk++;
                 var start = chunkIndex * maxChunkBytes;
                 var end = Math.min(file.size, start + maxChunkBytes);
                 var blob = file.slice(start, end);
-                var result = await uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates);
-
-                completedChunks++;
-                uploadedBytes += blob.size;
-                if (result.complete) {
-                    finalResult = result;
+    
+                try {
+                    var result = await uploadChunkWithRetry(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates);
+    
+                    completedChunks++;
+                    uploadedBytes += blob.size;
+                    if (result.complete) {
+                        finalResult = result;
+                    }
+    
+                    updateProgress(row, uploadedBytes, file.size, completedChunks, totalChunks, startedAt, result.merging);
+                } catch (error) {
+                    uploadError = error;
+                    throw error;
                 }
-
-                updateProgress(row, uploadedBytes, file.size, completedChunks, totalChunks, startedAt, result.merging);
             }
+        }
+    
+        var workers = [];
+        var workerCount = Math.min(parallelUploads, totalChunks);
+        for (var i = 0; i < workerCount; i++) {
+            workers.push(worker());
+        }
+    
+        try {
+            await Promise.all(workers);
         } catch (error) {
             setQueueError(row, error.message);
             throw error;
         }
-
+    
         if (!finalResult) {
             setQueueError(row, "Upload reached the server but no completion response was returned.");
             throw new Error("Upload completion could not be confirmed for " + file.name + ".");
         }
-
+    
         row.classList.add("done");
         row.querySelector(".queue-state").textContent = "Done";
         row.querySelector(".progress > span").style.width = "100%";
+        if (finalResult.fileName !== file.name) {
+            row.querySelector(".queue-name").textContent += " (Renamed)";
+        }
         var detail = document.createElement("div");
         detail.className = "meta";
-        detail.textContent = (finalResult.fileName !== file.name ? "Stored as " + finalResult.fileName + " · " : "") + "SHA-256 " + finalResult.sha256;
+        detail.textContent = "SHA-256: " + finalResult.sha256;
         row.appendChild(detail);
     }
-
+    <!--修改：deepseek修复并发分片-->
     async function uploadChunk(file, blob, uploadId, group, chunkIndex, totalChunks, preserveDuplicates) {
         var data = new FormData();
         data.append("uploadId", uploadId);
@@ -762,7 +786,7 @@
     }
 
     function updateUploadStatus(uploadedCount, totalCount, failedCount) {
-        uploadStatus.textContent = "上传 " + uploadedCount + "/" + totalCount + "，上传失败 " + failedCount;
+        uploadStatus.textContent = "uploads: " + uploadedCount + "/" + totalCount + ", failures: " + failedCount;
     }
 
     function updateProgress(row, uploadedBytes, totalBytes, completedChunks, totalChunks, startedAt, merging) {
@@ -770,8 +794,8 @@
         var elapsed = Math.max(1, (Date.now() - startedAt) / 1000);
         var speed = uploadedBytes / elapsed;
         row.querySelector(".progress > span").style.width = percent.toFixed(2) + "%";
-        row.querySelector(".queue-state").textContent = merging ? "Merging" : Math.floor(percent) + "% · " + completedChunks + "/" + totalChunks + " · " + formatBytes(speed) + "/s";
-    }
+        row.querySelector(".queue-state").textContent = merging ? "Merging" : Math.floor(percent) + "%, chunks " + completedChunks + "/" + totalChunks + ", " + formatBytes(speed) + "/s";
+    } <!--修改：上传进度显示-->
 
     function setQueueError(row, message) {
         row.classList.add("error");

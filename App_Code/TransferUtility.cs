@@ -12,7 +12,7 @@ public static class TransferUtility
     public const string GroupReadOnly = "group2";
     public const string GroupHidden = "group3";
 
-    private const int DefaultMaxChunkBytes = 256 * 1024 * 1024;
+    private const int DefaultMaxChunkBytes = 64 * 1024 * 1024;
     private const int MinChunkBytes = 1024 * 1024;
     private static readonly object CleanupLock = new object();
     private static DateTime LastCleanupUtc = DateTime.MinValue;
@@ -227,8 +227,10 @@ public static class TransferUtility
         {
             configured = DefaultMaxChunkBytes;
         }
-
-        configured = Math.Max(MinChunkBytes, Math.Min(Int32.MaxValue, configured));
+        if (configured > Int32.MaxValue || configured < MinChunkBytes)
+        {
+            configured = DefaultMaxChunkBytes;
+        }
         return (int)configured;
     }
 
@@ -237,24 +239,18 @@ public static class TransferUtility
         string raw = ConfigurationManager.AppSettings["TransferMaxChunkBytes"];
         if (String.IsNullOrWhiteSpace(raw))
         {
-            return "code default";
+            return "default";
         }
-
         long configured;
         if (!Int64.TryParse(raw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out configured))
         {
-            return "invalid web.config value, using code default";
+            return "invalid config";
         }
-        if (configured < MinChunkBytes)
+        if (configured < MinChunkBytes || configured > Int32.MaxValue)
         {
-            return "web.config, clamped to minimum";
+            return "invalid config";
         }
-        if (configured > Int32.MaxValue)
-        {
-            return "web.config, clamped to Int32 maximum";
-        }
-
-        return "web.config";
+        return "config";
     }
 
     public static long GetMaxFileBytes()
@@ -529,7 +525,7 @@ public static class TransferUtility
 public class DuplicateFileException : InvalidOperationException
 {
     public DuplicateFileException(string fileName)
-        : base("A file named " + Path.GetFileName(fileName ?? String.Empty) + " already exists. Select 保留重复文件 to upload a renamed copy.")
+        : base("This file already exists.")
     {
     }
 }
